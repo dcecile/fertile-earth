@@ -1,6 +1,7 @@
 use crate::context as svc_context;
 use crate::executor as svc_executor;
 use crate::handle as svc_handle;
+use crate::state::State;
 use anyhow::anyhow;
 use anyhow::Result;
 use hyper::server::conn::http2;
@@ -12,10 +13,14 @@ use rustls_pemfile::pkcs8_private_keys;
 use std::env;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
+use std::pin::pin;
 use std::sync::Arc;
 use tokio::fs::read;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::signal::unix::signal;
+use tokio::signal::unix::SignalKind;
+use tokio::task::JoinHandle;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -23,8 +28,29 @@ use tokio_stream::StreamExt as _;
 use tokio_util::task::TaskTracker;
 
 pub async fn serve(ctx: Arc<svc_context::ContextImpl>) -> Result<()> {
+  let receive_handle = receive_termination_signal(&ctx)?;
+
   let tls_server_config = Arc::new(build_tls_server_config().await?);
-  serve_tcp_accept(ctx, tls_server_config).await
+  serve_tcp_accept(ctx, tls_server_config).await?;
+
+  receive_handle.await?;
+
+  Ok(())
+}
+
+#[allow(clippy::print_stdout)]
+fn receive_termination_signal(
+  ctx: &Arc<svc_context::ContextImpl>,
+) -> Result<JoinHandle<()>> {
+  let mut sigterm = signal(SignalKind::terminate())?;
+  let shutdown = ctx.state.shutdown().clone();
+  let handle = tokio::spawn(async move {
+    if sigterm.recv().await.is_some() {
+      println!("Received termination signal, shutting down...");
+      shutdown.cancel();
+    }
+  });
+  Ok(handle)
 }
 
 async fn build_tls_server_config() -> Result<TlsServerConfig> {
@@ -118,9 +144,9 @@ async fn serve_http2(
   });
   let executor =
     svc_executor::Executor::new(ctx.clone(), &request_task_tracker);
-  let connection_result = http2::Builder::new(executor)
-    .serve_connection(tcp_io, service)
-    .await;
+  let connection =
+    pin!(http2::Builder::new(executor).serve_connection(tcp_io, service));
+  let connection_result = connection.await;
   if let Err(err) = connection_result {
     eprintln!("Error serving connection: {err:?}");
   }

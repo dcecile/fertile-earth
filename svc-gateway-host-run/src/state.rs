@@ -9,6 +9,7 @@ use mockall::mock;
 use std::cell::OnceCell;
 use std::pin::pin;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 pub trait Context
 where
@@ -34,11 +35,13 @@ tokio::task_local! {
 
 #[cfg_attr(test, automock)]
 pub trait State {
+  fn shutdown(&self) -> &CancellationToken;
   fn response_streams(&self) -> &DashMap<Vec<u8>, ResponseStreamState>;
 }
 
 #[derive(Debug)]
 pub struct StateImpl {
+  shutdown: CancellationToken,
   response_streams: DashMap<Vec<u8>, ResponseStreamState>,
 }
 
@@ -46,12 +49,17 @@ impl StateImpl {
   #[must_use]
   pub fn init() -> Self {
     StateImpl {
+      shutdown: CancellationToken::new(),
       response_streams: DashMap::new(),
     }
   }
 }
 
 impl State for StateImpl {
+  fn shutdown(&self) -> &CancellationToken {
+    &self.shutdown
+  }
+
   fn response_streams(&self) -> &DashMap<Vec<u8>, ResponseStreamState> {
     &self.response_streams
   }
